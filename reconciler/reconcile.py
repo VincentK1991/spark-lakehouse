@@ -1,9 +1,10 @@
 """
-Reconciles reconciler/grants.yaml against Keycloak (groups/members) and
-Lakekeeper (roles/role-members/permission-grants). Additive and idempotent:
-re-running only adds what's missing, it never removes a group/role member or
-grant that this file no longer lists (removal reconciliation is a possible
-future enhancement, out of scope for this first pass).
+Reconciles reconciler/groups.yaml and reconciler/grants.yaml against Keycloak
+(groups/members) and Lakekeeper (roles/role-members/permission-grants).
+Additive and idempotent: re-running only adds what's missing, it never
+removes a group/role member or grant that these files no longer list
+(removal reconciliation is a possible future enhancement, out of scope for
+this first pass).
 
 Run with:
     docker compose run --rm reconciler
@@ -15,6 +16,8 @@ import sys
 import requests
 import yaml
 
+from enums import Permission, ResourceType
+
 LAKEKEEPER_URL = os.environ["LAKEKEEPER_URL"]
 MANAGEMENT_URL = f"{LAKEKEEPER_URL}/management"
 CATALOG_URL = f"{LAKEKEEPER_URL}/catalog"
@@ -23,17 +26,8 @@ KEYCLOAK_ADMIN_API_URL = os.environ["KEYCLOAK_ADMIN_API_URL"]
 CLIENT_ID = os.environ["RECONCILER_CLIENT_ID"]
 CLIENT_SECRET = os.environ["RECONCILER_CLIENT_SECRET"]
 
+GROUPS_FILE = os.path.join(os.path.dirname(__file__), "groups.yaml")
 GRANTS_FILE = os.path.join(os.path.dirname(__file__), "grants.yaml")
-
-VALID_PERMISSIONS = {
-    "describe",
-    "select",
-    "create",
-    "modify",
-    "ownership",
-    "pass_grants",
-    "manage_grants",
-}
 
 
 def get_token() -> str:
@@ -199,20 +193,20 @@ def get_table_id(token: str, warehouse_id: str, namespace: str, table: str) -> s
 def ensure_grant(
     token: str, resource_type: str, resource_path: str, permission: str, role_id: str
 ) -> None:
-    if permission not in VALID_PERMISSIONS:
+    if permission not in Permission._value2member_map_:
         raise SystemExit(f"Unknown permission '{permission}' for {resource_path}")
 
     parts = resource_path.split(".")
     warehouse_name = parts[0]
     warehouse_id = get_warehouse_id(token, warehouse_name)
 
-    if resource_type == "warehouse":
+    if resource_type == ResourceType.WAREHOUSE:
         assignments_path = f"/v1/permissions/warehouse/{warehouse_id}/assignments"
-    elif resource_type == "namespace":
+    elif resource_type == ResourceType.NAMESPACE:
         namespace = ".".join(parts[1:])
         namespace_id = get_namespace_id(token, warehouse_id, namespace)
         assignments_path = f"/v1/permissions/namespace/{namespace_id}/assignments"
-    elif resource_type == "table":
+    elif resource_type == ResourceType.TABLE:
         namespace = ".".join(parts[1:-1])
         table = parts[-1]
         table_id = get_table_id(token, warehouse_id, namespace, table)
@@ -235,16 +229,18 @@ def ensure_grant(
 
 
 def main() -> None:
+    with open(GROUPS_FILE) as f:
+        groups_spec = yaml.safe_load(f)
     with open(GRANTS_FILE) as f:
-        spec = yaml.safe_load(f)
+        grants_spec = yaml.safe_load(f)
 
     token = get_token()
 
     print("Syncing groups (Keycloak groups + Lakekeeper roles/members)...")
-    role_ids = sync_groups(token, spec.get("groups", {}))
+    role_ids = sync_groups(token, groups_spec.get("groups", {}))
 
     print("Applying grants...")
-    for grant in spec.get("grants", []):
+    for grant in grants_spec.get("grants", []):
         role_id = role_ids.get(grant["group"])
         if role_id is None:
             raise SystemExit(f"Grant references unknown group '{grant['group']}'")

@@ -1,40 +1,15 @@
 # Declarative access control for the lakehouse.
 #
-# `groups` declares membership by company email (or `service_accounts` for
-# machine identities). reconcile.py maps each group to a Lakekeeper Role and
-# each email/service-account to a Lakekeeper User (resolved via Keycloak).
+# Maps each group (a Lakekeeper Role, declared in groups.yaml) to a
+# permission level on a resource. `resource_path` addresses Lakekeeper's
+# warehouse -> namespace -> table hierarchy as `warehouse.namespace[.table]`;
+# a grant on a namespace is inherited by every table in it.
 #
-# `grants` maps each group (Lakekeeper Role) to a permission level on a
-# resource. `resource_path` addresses Lakekeeper's warehouse -> namespace ->
-# table hierarchy as `warehouse.namespace[.table]`; a grant on a namespace is
-# inherited by every table in it.
+# Valid `resource_type` and `permission` values are defined in enums.py
+# (ResourceType, Permission).
 #
 # Re-run after editing this file:
 #   docker compose run --rm reconciler
-
-groups:
-  data-eng-writers:
-    description: "Can write to core data engineering tables"
-    members:
-      - alice@company.com
-      - bob@company.com
-
-  sales-analytics-readonly:
-    description: "Read-only access to sales reporting tables"
-    members:
-      - carol@company.com
-      - dave@company.com
-
-  sensitive-translation-readers:
-    description: "Can read machine-translated sensitive documents"
-    members:
-      - erin@company.com
-      - frank@company.com
-
-  translation-pipeline-writers:
-    description: "Service identity for the batch translation pipeline"
-    service_accounts:
-      - translation-pipeline # Keycloak client_id, not a human email
 
 grants:
   - group: data-eng-writers
@@ -61,3 +36,8 @@ grants:
     resource_type: table
     resource_path: local.content.translated_documents_sensitive
     permission: select # only this team can read translated output
+
+  - group: sales-table-creators
+    resource_type: namespace
+    resource_path: local.sales
+    permission: create # lets alice create new tables under local.sales.*
