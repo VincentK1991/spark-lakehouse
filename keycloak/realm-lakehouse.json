@@ -543,10 +543,33 @@
       "optionalClientScopes": [
         "lakekeeper"
       ]
+    },
+    {
+      "clientId": "table-definitions",
+      "name": "Table Definitions Apply",
+      "description": "Confidential service-account client used by table_definitions/apply.py to create contract tables. Not a human user — deploys table schemas ahead of ETL, gated by its own create grant in reconciler/grants.yaml (table-definitions-writer group).",
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "86af3400c9e378c65237b57e4957b92b",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "basic",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "lakekeeper"
+      ]
     }
   ],
   "users": [
     {
+      "id": "eee01efe-2f93-44f4-bd68-02c8367f2712",
       "username": "vkieuvongngam",
       "email": "vkieuvongngam@gmail.com",
       "emailVerified": true,
@@ -562,6 +585,7 @@
       ]
     },
     {
+      "id": "169f6a4a-fdd9-4cd8-a2fd-6076f55a51db",
       "username": "alice",
       "email": "alice@company.com",
       "emailVerified": true,
@@ -577,6 +601,7 @@
       ]
     },
     {
+      "id": "bff947dc-7dbb-4f64-ae29-b2547cf30694",
       "username": "bob",
       "email": "bob@company.com",
       "emailVerified": true,
@@ -592,6 +617,7 @@
       ]
     },
     {
+      "id": "aca6325d-2663-4701-aa99-d7afb76d26e5",
       "username": "carol",
       "email": "carol@company.com",
       "emailVerified": true,
@@ -607,6 +633,7 @@
       ]
     },
     {
+      "id": "fb1c06c0-dbd9-44b3-b5eb-75333a613a40",
       "username": "dave",
       "email": "dave@company.com",
       "emailVerified": true,
@@ -622,6 +649,7 @@
       ]
     },
     {
+      "id": "0f83c830-4e56-47ec-92bf-210cd0e31d6b",
       "username": "erin",
       "email": "erin@company.com",
       "emailVerified": true,
@@ -637,6 +665,7 @@
       ]
     },
     {
+      "id": "d8997dd5-8675-40d6-b1b4-7fbd81102aae",
       "username": "frank",
       "email": "frank@company.com",
       "emailVerified": true,
@@ -652,6 +681,7 @@
       ]
     },
     {
+      "id": "b9ea5406-8411-4104-a0bb-4a2f5bf793c8",
       "username": "service-account-reconciler",
       "enabled": true,
       "serviceAccountClientId": "reconciler",
@@ -663,6 +693,24 @@
           "query-users"
         ]
       }
+    },
+    {
+      "id": "b13f4e87-f9bf-42a8-85e9-9c42ede9780d",
+      "username": "service-account-trino",
+      "enabled": true,
+      "serviceAccountClientId": "trino"
+    },
+    {
+      "id": "d07af059-9c8e-4a3c-a9f6-2232a7f4d894",
+      "username": "service-account-translation-pipeline",
+      "enabled": true,
+      "serviceAccountClientId": "translation-pipeline"
+    },
+    {
+      "id": "51ae9630-0f3c-44bf-8a20-a52301b2eac2",
+      "username": "service-account-table-definitions",
+      "enabled": true,
+      "serviceAccountClientId": "table-definitions"
     }
   ]
 }

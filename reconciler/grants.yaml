@@ -13,9 +13,9 @@
 
 grants:
   - group: data-eng-writers
-    resource_type: table
-    resource_path: local.sales.orders
-    permission: modify # Lakekeeper's write-capable permission
+    resource_type: namespace
+    resource_path: local.sales
+    permission: modify # inherited by orders, orders_v2, orders_v3, and any future table under local.sales
 
   - group: sales-analytics-readonly
     resource_type: table
@@ -41,3 +41,8 @@ grants:
     resource_type: namespace
     resource_path: local.sales
     permission: create # lets alice create new tables under local.sales.*
+
+  - group: table-definitions-writer
+    resource_type: namespace
+    resource_path: local.sales
+    permission: create # lets table_definitions/apply.py create contract tables under local.sales.*

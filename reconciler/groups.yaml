@@ -38,3 +38,8 @@ groups:
     description: "Can create new tables under local.sales"
     members:
       - alice@company.com
+
+  table-definitions-writer:
+    description: "Service identity for table_definitions/apply.py schema-contract deploys"
+    service_accounts:
+      - table-definitions # Keycloak client_id, not a human email

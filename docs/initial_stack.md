@@ -33,7 +33,8 @@ never typed into a login prompt.
 Keycloak confidential-client secrets (only needed if you're calling APIs
 directly, e.g. from a script): `trino` = `f472d1eaa5660b41eedf5bcbdea54822`,
 `reconciler` = `8e804e302000d95938c4baff238db8a4`,
-`translation-pipeline` = `3b72bdba62d4eb78ca21d0d735bcaa05`.
+`translation-pipeline` = `3b72bdba62d4eb78ca21d0d735bcaa05`,
+`table-definitions` = `86af3400c9e378c65237b57e4957b92b`.
 
 All of the above live in [`.env`](../.env) (source of truth) and are mirrored
 into [`keycloak/realm-lakehouse.json`](../keycloak/realm-lakehouse.json) — see
@@ -56,6 +57,13 @@ Realm `lakehouse` is imported declaratively from
 - Console: http://localhost:8080 (see [Credentials](#credentials))
 - Token endpoint: `http://localhost:8080/realms/lakehouse/protocol/openid-connect/token`
 - Mock users and the platform admin are listed in [Credentials](#credentials).
+- Every `users` entry has a pinned `id` — **do not remove these.** Lakekeeper/
+  OpenFGA grants are keyed to that `id`, not the email/`client_id`; an
+  unpinned entry gets a fresh random `id` on every realm re-import, silently
+  orphaning its grants the next time Keycloak restarts. Adding a new
+  user/service-account here always needs an explicit `id` too. See
+  [`keycloak_restart_broke_authz.md`](keycloak_restart_broke_authz.md) for
+  what happens when this slips.
 
 ### OpenFGA — authorization (fine-grained access control)
 Stores the actual permission tuples (who can select/modify what) as a

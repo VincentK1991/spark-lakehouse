@@ -99,6 +99,13 @@ def build_spark_conf(token: str, app_name: str):
         "spark.sql.catalog.lakekeeper.warehouse": WAREHOUSE,
         "spark.sql.catalog.lakekeeper.token": token,
         "spark.sql.catalog.lakekeeper.oauth2-server-uri": KEYCLOAK_TOKEN_URL,
+        # Lakekeeper's vended per-table config reliably carries the S3
+        # endpoint (see the module docstring / docs/CORS_issues.md) but not
+        # the region, so the AWS SDK's region-provider chain finds nothing
+        # and refuses to guess — same reason trino/catalog/lakekeeper.properties
+        # sets s3.region explicitly. Value matches the warehouse's storage
+        # profile in lakekeeper/bootstrap.py.
+        "spark.sql.catalog.lakekeeper.client.region": "us-east-1",
         "spark.ui.enabled": "false",
     }.items():
         conf.set(key, value)
