@@ -1,0 +1,46 @@
+[project]
+name = "lakehouse-spark"
+version = "0.1.0"
+description = "Local PySpark/Jupyter client for the lakehouse (runs on the host, not in Docker)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pyspark>=3.5,<4",
+    "requests>=2.32.3",
+    "pandas>=2.2",
+    "ipykernel>=6.29",
+    "notebook>=7.2",
+    "python-dotenv>=1.0",
+    # Python 3.12 removed distutils (PEP 632) but PySpark 3.5 still imports it
+    # in pyspark.sql.pandas.utils, so any pandas interop (e.g.
+    # createDataFrame(pandas_df)) raises ModuleNotFoundError. setuptools ships
+    # the supported distutils compatibility shim that restores it.
+    "setuptools>=75",
+    "pyarrow>=4.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "pyright>=1.1.390",
+    "types-requests>=2.32",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"

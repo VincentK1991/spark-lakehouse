@@ -1,0 +1,320 @@
+name: spark-lakehouse
+
+networks:
+  lakehouse_net:
+
+volumes:
+  minio_data:
+  postgres_lakekeeper_data:
+  postgres_openfga_data:
+  # Shared uv download cache for the one-shot bootstrap/reconciler jobs, so
+  # re-running them doesn't re-fetch wheels into a throwaway container.
+  uv_cache:
+
+services:
+  # ─────────────────────────── Storage: MinIO ───────────────────────────
+  minio:
+    image: ${MINIO_IMAGE}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # Lets the Lakekeeper console's browser-side DuckDB-WASM preview read
+      # table data directly from MinIO. "*" is fine for this localhost-only
+      # dev stack; bucket-level CORS (`mc cors`) is an AIStor-only feature,
+      # so this has to be the global/server-wide setting instead.
+      MINIO_API_CORS_ALLOW_ORIGIN: "*"
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks:
+      lakehouse_net:
+        aliases:
+          # One storage hostname that resolves identically inside Docker (via
+          # this alias) and from your machine (browsers resolve the reserved
+          # .localhost TLD to loopback per RFC 6761, hitting the published
+          # port). That's what lets a single endpoint URL in the warehouse's
+          # storage profile work for in-cluster clients AND the browser.
+          - minio.localhost
+
+  mc-init:
+    image: ${MC_IMAGE}
+    entrypoint: ["sh", "/init.sh"]
+    volumes:
+      - ./minio/init.sh:/init.sh:ro
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_LAKEKEEPER_ACCESS_KEY: ${MINIO_LAKEKEEPER_ACCESS_KEY}
+      MINIO_LAKEKEEPER_SECRET_KEY: ${MINIO_LAKEKEEPER_SECRET_KEY}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      lakehouse_net:
+
+  # ─────────────────────────── AuthN: Keycloak ───────────────────────────
+  keycloak:
+    image: ${KEYCLOAK_IMAGE}
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    command:
+      [
+        "start-dev",
+        "--metrics-enabled=true",
+        "--health-enabled=true",
+        "--import-realm",
+      ]
+    volumes:
+      - ./keycloak/realm-lakehouse.json:/opt/keycloak/data/import/realm-lakehouse.json:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/8080;echo -e \"GET /realms/master/.well-known/openid-configuration HTTP/1.1\r\nhost: 127.0.0.1:8080\r\nConnection: close\r\n\r\n\" >&3;grep 'jwks_uri' <&3",
+        ]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks:
+      lakehouse_net:
+
+  # ─────────────────────────── AuthZ: OpenFGA ───────────────────────────
+  postgres-openfga:
+    image: ${POSTGRES_IMAGE}
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_OPENFGA_PASSWORD}
+      POSTGRES_DB: openfga
+    volumes:
+      - postgres_openfga_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d openfga"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    networks:
+      lakehouse_net:
+
+  openfga-migrate:
+    image: ${OPENFGA_IMAGE}
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://postgres:${POSTGRES_OPENFGA_PASSWORD}@postgres-openfga:5432/openfga?sslmode=disable
+    depends_on:
+      postgres-openfga:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      lakehouse_net:
+
+  openfga:
+    image: ${OPENFGA_IMAGE}
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://postgres:${POSTGRES_OPENFGA_PASSWORD}@postgres-openfga:5432/openfga?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    ports:
+      - "3001:3000" # Playground UI (dev/observability console into the authz model & tuples)
+    depends_on:
+      postgres-openfga:
+        condition: service_healthy
+      openfga-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=openfga:8081"]
+      interval: 3s
+      timeout: 10s
+      retries: 20
+    networks:
+      lakehouse_net:
+
+  # ─────────────────────────── Catalog: Lakekeeper ───────────────────────────
+  postgres-lakekeeper:
+    image: ${POSTGRES_IMAGE}
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_LAKEKEEPER_PASSWORD}
+      POSTGRES_DB: lakekeeper
+    volumes:
+      - postgres_lakekeeper_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lakekeeper"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    networks:
+      lakehouse_net:
+
+  lakekeeper-migrate:
+    image: ${LAKEKEEPER_IMAGE}
+    pull_policy: always
+    entrypoint: ["/home/nonroot/lakekeeper", "migrate"]
+    environment:
+      LAKEKEEPER__PG_ENCRYPTION_KEY: ${LAKEKEEPER_PG_ENCRYPTION_KEY}
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://postgres:${POSTGRES_LAKEKEEPER_PASSWORD}@postgres-lakekeeper:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://postgres:${POSTGRES_LAKEKEEPER_PASSWORD}@postgres-lakekeeper:5432/lakekeeper
+      LAKEKEEPER__AUTHZ_BACKEND: openfga
+      LAKEKEEPER__OPENFGA__ENDPOINT: http://openfga:8081
+    depends_on:
+      postgres-lakekeeper:
+        condition: service_healthy
+      openfga:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      lakehouse_net:
+
+  lakekeeper:
+    image: ${LAKEKEEPER_IMAGE}
+    pull_policy: always
+    command: ["serve"]
+    environment:
+      LAKEKEEPER__PG_ENCRYPTION_KEY: ${LAKEKEEPER_PG_ENCRYPTION_KEY}
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgresql://postgres:${POSTGRES_LAKEKEEPER_PASSWORD}@postgres-lakekeeper:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgresql://postgres:${POSTGRES_LAKEKEEPER_PASSWORD}@postgres-lakekeeper:5432/lakekeeper
+      LAKEKEEPER__AUTHZ_BACKEND: openfga
+      LAKEKEEPER__OPENFGA__ENDPOINT: http://openfga:8081
+      LAKEKEEPER__OPENID_PROVIDER_URI: http://keycloak:8080/realms/lakehouse
+      LAKEKEEPER__OPENID_ADDITIONAL_ISSUERS: http://localhost:8080/realms/lakehouse
+      LAKEKEEPER__OPENID_AUDIENCE: lakekeeper
+      LAKEKEEPER__UI__OPENID_CLIENT_ID: lakekeeper-ui
+      LAKEKEEPER__UI__OPENID_PROVIDER_URI: http://localhost:8080/realms/lakehouse
+    ports:
+      - "8181:8181" # REST catalog + management API + bundled console + /swagger-ui/
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+      postgres-lakekeeper:
+        condition: service_healthy
+      mc-init:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 2s
+      timeout: 10s
+      retries: 20
+      start_period: 5s
+    networks:
+      lakehouse_net:
+
+  bootstrap:
+    image: ${UV_IMAGE}
+    working_dir: /app
+    # uv + the project's locked pyproject.toml/uv.lock. The venv goes outside
+    # /app because the project is mounted read-only.
+    command:
+      ["sh", "-c", "uv sync --frozen --no-dev && uv run python bootstrap.py"]
+    volumes:
+      - ./lakekeeper:/app:ro
+      - uv_cache:/uv-cache
+    environment:
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+      UV_CACHE_DIR: /uv-cache
+      LAKEKEEPER_URL: http://lakekeeper:8181
+      KEYCLOAK_TOKEN_URL: http://keycloak:8080/realms/lakehouse/protocol/openid-connect/token
+      KEYCLOAK_ADMIN_API_URL: http://keycloak:8080/admin/realms/lakehouse
+      RECONCILER_CLIENT_ID: reconciler
+      RECONCILER_CLIENT_SECRET: ${RECONCILER_CLIENT_SECRET}
+      ADMIN_EMAIL: vkieuvongngam@gmail.com
+      WAREHOUSE_NAME: ${LAKEKEEPER_WAREHOUSE_NAME}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      # This endpoint is stored in the warehouse's storage profile and handed
+      # to every client, including the browser (console preview) — so it must
+      # resolve both inside Docker and outside it. "minio.localhost" does:
+      # a network alias covers in-cluster clients, and browsers resolve the
+      # reserved .localhost TLD to loopback (RFC 6761) → published port 9000.
+      MINIO_ENDPOINT: http://minio.localhost:9000
+      MINIO_LAKEKEEPER_ACCESS_KEY: ${MINIO_LAKEKEEPER_ACCESS_KEY}
+      MINIO_LAKEKEEPER_SECRET_KEY: ${MINIO_LAKEKEEPER_SECRET_KEY}
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      lakehouse_net:
+
+  # ─────────────────────────── Query: Trino + SQLPad ───────────────────────────
+  trino:
+    image: ${TRINO_IMAGE}
+    environment:
+      TRINO_CLIENT_SECRET: ${TRINO_CLIENT_SECRET}
+      MINIO_LAKEKEEPER_ACCESS_KEY: ${MINIO_LAKEKEEPER_ACCESS_KEY}
+      MINIO_LAKEKEEPER_SECRET_KEY: ${MINIO_LAKEKEEPER_SECRET_KEY}
+    volumes:
+      - ./trino/catalog/lakekeeper.properties:/etc/trino/catalog/lakekeeper.properties:ro
+    ports:
+      - "8090:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-I", "http://localhost:8080/v1/status"]
+      interval: 3s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    networks:
+      lakehouse_net:
+
+  sqlpad:
+    image: ${SQLPAD_IMAGE}
+    environment:
+      SQLPAD_ADMIN: ${SQLPAD_ADMIN}
+      SQLPAD_ADMIN_PASSWORD: ${SQLPAD_ADMIN_PASSWORD}
+      SQLPAD_DEFAULT_CONNECTION_ID: lakekeeper
+      SQLPAD_CONNECTIONS__lakekeeper__name: Lakekeeper (via Trino)
+      SQLPAD_CONNECTIONS__lakekeeper__driver: trino
+      SQLPAD_CONNECTIONS__lakekeeper__host: trino
+      SQLPAD_CONNECTIONS__lakekeeper__port: "8080"
+      SQLPAD_CONNECTIONS__lakekeeper__username: trino
+      SQLPAD_CONNECTIONS__lakekeeper__catalog: lakekeeper
+    ports:
+      - "3000:3000"
+    depends_on:
+      trino:
+        condition: service_healthy
+    networks:
+      lakehouse_net:
+
+  # ─────────────────────────── Access control: reconciler ───────────────────────────
+  # Not started by `docker compose up`. Run explicitly and re-run any time
+  # reconciler/grants.yaml changes:
+  #   docker compose run --rm reconciler
+  reconciler:
+    image: ${UV_IMAGE}
+    working_dir: /app
+    # uv + the project's locked pyproject.toml/uv.lock. The venv goes outside
+    # /app because the project is mounted read-only.
+    command:
+      ["sh", "-c", "uv sync --frozen --no-dev && uv run python reconcile.py"]
+    volumes:
+      - ./reconciler:/app:ro
+      - uv_cache:/uv-cache
+    environment:
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+      UV_CACHE_DIR: /uv-cache
+      LAKEKEEPER_URL: http://lakekeeper:8181
+      KEYCLOAK_TOKEN_URL: http://keycloak:8080/realms/lakehouse/protocol/openid-connect/token
+      KEYCLOAK_ADMIN_API_URL: http://keycloak:8080/admin/realms/lakehouse
+      RECONCILER_CLIENT_ID: reconciler
+      RECONCILER_CLIENT_SECRET: ${RECONCILER_CLIENT_SECRET}
+      WAREHOUSE_NAME: ${LAKEKEEPER_WAREHOUSE_NAME}
+    profiles: ["tools"]
+    networks:
+      lakehouse_net:

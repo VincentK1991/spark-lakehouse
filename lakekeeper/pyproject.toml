@@ -1,0 +1,36 @@
+[project]
+name = "lakehouse-bootstrap"
+version = "0.1.0"
+description = "One-shot bootstrap: Lakekeeper server, warehouse, demo namespaces/tables"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "requests>=2.32.3",
+    "pyiceberg[pyarrow,s3fs]>=0.9.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "pyright>=1.1.390",
+    "types-requests>=2.32",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
