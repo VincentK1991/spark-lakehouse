@@ -20,20 +20,28 @@ advertises has to resolve for them.
 
 The helpers here (`get_credentials`, `get_token`, `build_spark_conf`,
 `get_spark_session`) are shared with the notebooks in this folder, so there is
-one implementation of the login/session-setup logic, not several.
+one implementation of the login/session-setup logic, not several. They are
+also reused, unmodified, by the JupyterHub singleuser image (see
+spark/docker/Dockerfile and docs/team_jupyter_hub.ipynb): KEYCLOAK_TOKEN_URL/
+CATALOG_URL/SPARK_MASTER_URL are env-overridable specifically so that
+in-cluster path can point at Docker-network hostnames and a real Spark
+cluster instead of localhost/local[*], without forking this file.
 """
 
 from __future__ import annotations
 
 import getpass
 import os
+import socket
 import sys
 
 import requests
 from dotenv import load_dotenv
 
-KEYCLOAK_TOKEN_URL = "http://localhost:8080/realms/lakehouse/protocol/openid-connect/token"
-CATALOG_URL = "http://localhost:8181/catalog"
+KEYCLOAK_TOKEN_URL = os.environ.get(
+    "KEYCLOAK_TOKEN_URL", "http://localhost:8080/realms/lakehouse/protocol/openid-connect/token"
+)
+CATALOG_URL = os.environ.get("CATALOG_URL", "http://localhost:8181/catalog")
 WAREHOUSE = "local"
 SPARK_CLIENT_ID = "spark"
 ICEBERG_VERSION = "1.10.0"
@@ -80,18 +88,20 @@ def build_spark_conf(token: str, app_name: str):
     storage endpoint in every LoadTable response and Iceberg gives that
     server-provided table config precedence, so setting it client-side would be
     silently ignored.
+
+    `master` defaults to the host-run `local[*]` flow. Set SPARK_MASTER_URL
+    (e.g. `spark://spark-master:7077`, as the JupyterHub notebook image does)
+    to run against the shared standalone cluster instead -- see
+    docs/team_jupyter_hub.ipynb.
     """
     import pyspark
     from pyspark.conf import SparkConf
 
-    spark_minor = ".".join(pyspark.__version__.split(".")[:2])
+    master = os.environ.get("SPARK_MASTER_URL", "local[*]")
+    in_cluster = master != "local[*]"
 
-    conf = SparkConf().setMaster("local[*]").setAppName(app_name)
-    for key, value in {
-        "spark.jars.packages": (
-            f"org.apache.iceberg:iceberg-spark-runtime-{spark_minor}_2.12:{ICEBERG_VERSION},"
-            f"org.apache.iceberg:iceberg-aws-bundle:{ICEBERG_VERSION}"
-        ),
+    conf = SparkConf().setMaster(master).setAppName(app_name)
+    settings = {
         "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
         "spark.sql.catalog.lakekeeper": "org.apache.iceberg.spark.SparkCatalog",
         "spark.sql.catalog.lakekeeper.type": "rest",
@@ -106,8 +116,44 @@ def build_spark_conf(token: str, app_name: str):
         # sets s3.region explicitly. Value matches the warehouse's storage
         # profile in lakekeeper/bootstrap.py.
         "spark.sql.catalog.lakekeeper.client.region": "us-east-1",
+        # Disabled for the host-run local[*] flow: with several sessions
+        # started one after another on the same machine, each would try to
+        # bind port 4040 and increment past it, which isn't worth the churn
+        # for a UI nobody was reaching anyway. In-cluster this is safe (one
+        # container == its own network namespace) and reachable through
+        # JupyterHub's proxy, so it's turned back on below.
         "spark.ui.enabled": "false",
-    }.items():
+    }
+
+    if in_cluster:
+        # Jars are baked into the shared spark-master/spark-worker/notebook
+        # image (spark/docker/Dockerfile) instead of resolved here, so every
+        # role runs an identical classpath -- no spark.jars.packages.
+        cores_max = os.environ.get("SPARK_CORES_MAX")
+        if cores_max:
+            settings["spark.cores.max"] = cores_max
+            settings["spark.executor.cores"] = "1"
+        settings["spark.driver.memory"] = "2g"
+        settings["spark.executor.memory"] = "2g"
+        # Reachable at /user/<name>/proxy/4040/ via jupyter-server-proxy,
+        # which tunnels it through the Hub -- only Jupyter's own port is
+        # published from a spawned singleuser container otherwise.
+        settings["spark.ui.enabled"] = "true"
+        settings["spark.ui.port"] = "4040"
+        # #1 client-mode failure: executors connect back to the driver, and
+        # Spark won't reliably auto-detect a reachable address for a
+        # container on a Docker network, so it's set explicitly here rather
+        # than left to autodetection.
+        settings["spark.driver.host"] = socket.gethostbyname(socket.gethostname())
+        settings["spark.driver.bindAddress"] = "0.0.0.0"
+    else:
+        spark_minor = ".".join(pyspark.__version__.split(".")[:2])
+        settings["spark.jars.packages"] = (
+            f"org.apache.iceberg:iceberg-spark-runtime-{spark_minor}_2.12:{ICEBERG_VERSION},"
+            f"org.apache.iceberg:iceberg-aws-bundle:{ICEBERG_VERSION}"
+        )
+
+    for key, value in settings.items():
         conf.set(key, value)
     return conf
 

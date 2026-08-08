@@ -2,9 +2,10 @@
 
 A local data lakehouse: MinIO (storage) + Lakekeeper (Iceberg REST catalog) +
 Keycloak (authentication) + OpenFGA (authorization) + Trino/SQLPad (ad-hoc SQL)
-+ local PySpark (per-user reads/writes). All components run via
-`docker compose up -d`, except PySpark, which runs on your machine and talks
-to the stack over `localhost`.
++ local PySpark (per-user reads/writes) + JupyterHub (browser-based per-user
+notebooks backed by a shared Spark standalone cluster). All components run
+via `docker compose up -d`, except local PySpark, which runs on your machine
+and talks to the stack over `localhost`.
 
 Access to tables/namespaces is granted declaratively in
 [`reconciler/grants.yaml`](../reconciler/grants.yaml) and applied by
@@ -24,6 +25,7 @@ All dev-only, throwaway values (see [Notes](#notes-on-this-dev-setup)).
 | SQLPad | http://localhost:3000 | `admin@lakehouse.local` | `test1234` |
 | Lakekeeper console | http://localhost:8181 | logs in via Keycloak — use any user/admin above | — |
 | Trino | http://localhost:8090 | no auth; any `X-Trino-User` header is accepted (dev-only) | — |
+| JupyterHub | http://localhost:8000 | logs in via Keycloak — use any user/admin above | — |
 
 Every human/console login uses the same password (`test1234`) for convenience
 in this dev stack. Postgres passwords, the Lakekeeper encryption key, and
@@ -34,7 +36,8 @@ Keycloak confidential-client secrets (only needed if you're calling APIs
 directly, e.g. from a script): `trino` = `f472d1eaa5660b41eedf5bcbdea54822`,
 `reconciler` = `8e804e302000d95938c4baff238db8a4`,
 `translation-pipeline` = `3b72bdba62d4eb78ca21d0d735bcaa05`,
-`table-definitions` = `86af3400c9e378c65237b57e4957b92b`.
+`table-definitions` = `86af3400c9e378c65237b57e4957b92b`,
+`jupyterhub` = `ac97e820f7d7c765acb9f419ce4705c7`.
 
 All of the above live in [`.env`](../.env) (source of truth) and are mirrored
 into [`keycloak/realm-lakehouse.json`](../keycloak/realm-lakehouse.json) — see
@@ -176,6 +179,44 @@ A Jupyter kernel named **"Lakehouse PySpark (3.12)"** is registered against
 `spark/.venv`, so the notebooks also work from an existing Jupyter install.
 Remove it with `jupyter kernelspec remove lakehouse-spark`.
 
+### JupyterHub — browser-based multi-user notebooks
+A second, additive way to run PySpark against the lakehouse: no local Python
+setup, no `/etc/hosts` edit, and a real distributed Spark cluster instead of
+`local[*]`. Design/build write-up: [`team_jupyter_hub.ipynb`](team_jupyter_hub.ipynb).
+
+- Hub: http://localhost:8000 — sign in via "Sign in with Keycloak" as any
+  mock user (see [Credentials](#credentials)); same trust boundary as the
+  Lakekeeper console (any Keycloak user may log in to the Hub itself — the
+  data-access boundary is Lakekeeper/OpenFGA, enforced by each notebook's own
+  separate Keycloak login, exactly as in the local PySpark flow above).
+- At spawn time you pick a session size — Small/Medium/Large (2/4/8 cores) —
+  which caps how many of the shared cluster's 8 cores your driver may claim
+  (`spark.cores.max`). Multiple users can pick different sizes concurrently;
+  Spark's master arbitrates the shared pool.
+- `spark-master` (`spark-master` service, UI at http://localhost:8082) +
+  2x `spark-worker` (4 cores each, no published ports) form the shared
+  standalone cluster, started by `docker compose up -d` like everything else.
+- The singleuser notebook image isn't started by `docker compose up -d` (it
+  has no long-running command) — build it once, and again after any change
+  to `spark/query_orders.py` or `spark/docker/`:
+  ```bash
+  docker compose build spark-notebook
+  ```
+- Inside a spawned notebook, `from query_orders import get_credentials,
+  get_spark_session` works exactly as in the local flow — it's the same
+  file, extended (not forked) to read `SPARK_MASTER_URL`/`SPARK_CORES_MAX`/
+  `KEYCLOAK_TOKEN_URL`/`CATALOG_URL` from the environment so it can target
+  the in-cluster Docker-network endpoints instead of `localhost`/`local[*]`.
+
+Known limitations, by design for this dev stack (see the design doc for the
+full rationale): the Hub's `jupyterhub` service needs
+`/var/run/docker.sock` mounted to spawn per-user containers — root-equivalent
+host access, in the same spirit as this stack's other dev-only shortcuts
+below. Spawned notebook containers are ephemeral (no per-user persistent
+storage yet). Signing in to the Hub and logging in to Lakekeeper inside the
+notebook are two separate steps against the same Keycloak realm — no token
+passthrough in this iteration.
+
 ### Access control: `reconciler/grants.yaml` + `reconcile.py`
 The single source of truth for who can do what. Declares groups (mapped to
 Lakekeeper roles) with members by email or service-account client ID, and
@@ -235,6 +276,8 @@ silently re-resolves.
 | Lakekeeper (catalog + management API + console) | http://localhost:8181 |
 | Trino | http://localhost:8090 |
 | SQLPad | http://localhost:3000 |
+| JupyterHub | http://localhost:8000 |
+| Spark master UI (standalone cluster, 2 workers x 4 cores) | http://localhost:8082 |
 
 ## Notes on this dev setup
 
@@ -284,3 +327,13 @@ silently re-resolves.
 - ROPC (Resource Owner Password Credentials) is used for local PySpark login
   because it's the simplest non-interactive flow for a notebook. It's
   deprecated in OAuth 2.1 and should never be used outside local dev.
+- JupyterHub's `jupyterhub` service mounts `/var/run/docker.sock` so it can
+  spawn one container per logged-in user (DockerSpawner) — root-equivalent
+  access to the host's Docker daemon. Acceptable only because this is a
+  localhost dev stack; a real deployment would need a proper spawner (e.g.
+  KubeSpawner against an actual Kubernetes cluster) instead. Spawned
+  notebook containers are ephemeral by default (no per-user persistent
+  volume yet), and signing in to the Hub via Keycloak SSO is a separate step
+  from each notebook's own Lakekeeper login (no token passthrough) — see
+  [`team_jupyter_hub.ipynb`](team_jupyter_hub.ipynb) for the full design
+  write-up and the corrections that came up during the build.

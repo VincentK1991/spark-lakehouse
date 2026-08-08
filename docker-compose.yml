@@ -2,6 +2,10 @@ name: spark-lakehouse
 
 networks:
   lakehouse_net:
+    # Pinned (compose would otherwise default to "spark-lakehouse_lakehouse_net",
+    # derived from the top-level `name:` above) so DockerSpawner.network_name
+    # in jupyterhub/jupyterhub_config.py has a stable value to reference.
+    name: lakehouse_net
 
 volumes:
   minio_data:
@@ -10,6 +14,7 @@ volumes:
   # Shared uv download cache for the one-shot bootstrap/reconciler jobs, so
   # re-running them doesn't re-fetch wheels into a throwaway container.
   uv_cache:
+  jupyterhub_data:
 
 services:
   # ─────────────────────────── Storage: MinIO ───────────────────────────
@@ -68,6 +73,22 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Pins the issuer Keycloak stamps into every token to this one fixed
+      # value, regardless of which literal hostname a given request arrived
+      # through (browser-facing `localhost:8080` vs in-network
+      # `keycloak:8080`). Without this, Keycloak 26's default "hostname-v2"
+      # behavior derives each token's `iss` claim from whichever hostname
+      # the request came in on -- so a JupyterHub login (browser hits
+      # localhost:8080) mints a token with iss=localhost:8080, but
+      # JupyterHub's userinfo call goes out via keycloak:8080 (the only
+      # hostname reachable from inside that container) and Keycloak rejects
+      # it: 401 invalid_token, "Token verification failed", because the
+      # request's own hostname disagrees with the token's issuer.
+      # Lakekeeper already worked around the same underlying behavior by
+      # accepting BOTH issuers (LAKEKEEPER__OPENID_ADDITIONAL_ISSUERS below);
+      # oauthenticator/JupyterHub has no such fallback, so pinning the
+      # issuer here is the fix for that path instead.
+      KC_HOSTNAME: http://localhost:8080
     command:
       [
         "start-dev",
@@ -316,5 +337,120 @@ services:
       RECONCILER_CLIENT_SECRET: ${RECONCILER_CLIENT_SECRET}
       WAREHOUSE_NAME: ${LAKEKEEPER_WAREHOUSE_NAME}
     profiles: ["tools"]
+    networks:
+      lakehouse_net:
+
+  # ─────────────────────────── Spark: standalone cluster ───────────────────────────
+  # spark-master and spark-worker share one image (built once, `target: base`
+  # in spark/docker/Dockerfile) with Iceberg's Spark-runtime + AWS-bundle jars
+  # baked into $SPARK_HOME/jars, so driver/worker classpaths can never skew.
+  # Total shared capacity: 2 workers x 4 cores = 8 cores. JupyterHub's
+  # Small/Medium/Large spawn profiles just cap how many of those 8 cores a
+  # given session's driver asks for via spark.cores.max -- see
+  # docs/team_jupyter_hub.ipynb.
+  spark-master:
+    build:
+      context: ./spark
+      dockerfile: docker/Dockerfile
+      target: base
+    image: ${SPARK_CLUSTER_IMAGE}
+    command:
+      [
+        "/opt/spark/bin/spark-class",
+        "org.apache.spark.deploy.master.Master",
+        "--host",
+        "spark-master",
+        "--port",
+        "7077",
+        "--webui-port",
+        "8080",
+      ]
+    ports:
+      - "8082:8080" # Master web UI (8080 is taken by Keycloak on the host)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks:
+      lakehouse_net:
+
+  spark-worker:
+    build:
+      context: ./spark
+      dockerfile: docker/Dockerfile
+      target: base
+    image: ${SPARK_CLUSTER_IMAGE}
+    command:
+      [
+        "/opt/spark/bin/spark-class",
+        "org.apache.spark.deploy.worker.Worker",
+        "--cores",
+        "4",
+        "--memory",
+        "4g",
+        "--webui-port",
+        "8081",
+        "spark://spark-master:7077",
+      ]
+    deploy:
+      replicas: 2
+    # No published ports: replicas can't share one host mapping, and there's
+    # no need for host access to a worker's own UI (the master UI at :8082
+    # shows aggregate worker/executor state).
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      lakehouse_net:
+
+  # Not started by `docker compose up` (no long-running command). Exists so
+  # `docker compose build spark-notebook` produces a stable, predictable
+  # image tag for jupyterhub/jupyterhub_config.py's DockerSpawner to
+  # reference -- naming a service explicitly on the build/run CLI bypasses
+  # profile gating, so this still builds even though it's in the "tools"
+  # profile like reconciler above.
+  spark-notebook:
+    build:
+      context: ./spark
+      dockerfile: docker/Dockerfile
+      target: notebook
+    image: ${SPARK_NOTEBOOK_IMAGE}
+    profiles: ["tools"]
+    networks:
+      lakehouse_net:
+
+  # ─────────────────────────── JupyterHub: multi-user notebooks ───────────────────────────
+  jupyterhub:
+    build:
+      context: ./jupyterhub
+    image: lakehouse/jupyterhub:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      # DockerSpawner needs the Docker API to launch per-user containers.
+      # Root-equivalent host access -- a deliberate dev-only tradeoff, see
+      # docs/team_jupyter_hub.ipynb "Security tradeoffs".
+      - /var/run/docker.sock:/var/run/docker.sock
+      # A subdirectory, not /srv/jupyterhub itself: that's also where the
+      # Dockerfile COPYs jupyterhub_config.py, and Docker seeds a named
+      # volume from the image's content at its mount point only once, on
+      # first creation -- mounting the whole directory would silently shadow
+      # every future image rebuild's config with that first-run snapshot.
+      - jupyterhub_data:/srv/jupyterhub/state
+    environment:
+      JUPYTERHUB_CLIENT_ID: jupyterhub
+      JUPYTERHUB_CLIENT_SECRET: ${JUPYTERHUB_CLIENT_SECRET}
+      OAUTH2_AUTHORIZE_URL: http://localhost:8080/realms/lakehouse/protocol/openid-connect/auth
+      OAUTH2_TOKEN_URL: http://keycloak:8080/realms/lakehouse/protocol/openid-connect/token
+      OAUTH2_USERDATA_URL: http://keycloak:8080/realms/lakehouse/protocol/openid-connect/userinfo
+      OAUTH_CALLBACK_URL: http://localhost:8000/hub/oauth_callback
+      SPARK_NOTEBOOK_IMAGE: ${SPARK_NOTEBOOK_IMAGE}
+      DOCKER_NETWORK_NAME: lakehouse_net
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
     networks:
       lakehouse_net:

@@ -501,6 +501,31 @@
       ]
     },
     {
+      "clientId": "jupyterhub",
+      "name": "JupyterHub",
+      "description": "Confidential client JupyterHub uses for Keycloak SSO login into the Hub itself. Does not grant Lakekeeper access by itself -- each spawned notebook still logs in to Lakekeeper separately via the spark client's ROPC flow above, same as the host-run flow.",
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "ac97e820f7d7c765acb9f419ce4705c7",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8000/hub/oauth_callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8000"
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "basic",
+        "email"
+      ]
+    },
+    {
       "clientId": "reconciler",
       "name": "Grants Reconciler",
       "description": "Confidential service-account client used by reconciler/reconcile.py to read/create Keycloak users & groups and to manage Lakekeeper roles/grants.",

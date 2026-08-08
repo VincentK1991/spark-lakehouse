@@ -1,0 +1,46 @@
+[project]
+name = "lakehouse-spark-notebook"
+version = "0.1.0"
+description = "JupyterHub singleuser image deps. Deliberately does NOT list pyspark: the image's baked-in $SPARK_HOME/python (matching the spark-master/spark-worker Spark distribution exactly) is put on PYTHONPATH instead, so the driver can never drift from the cluster's Spark/Iceberg jar versions."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "jupyterhub>=5.2",
+    "notebook>=7.2",
+    "ipykernel>=6.29",
+    "requests>=2.32.3",
+    "pandas>=2.2",
+    "python-dotenv>=1.0",
+    # See spark/pyproject.toml for why this is needed (PEP 632 / pandas interop).
+    "setuptools>=75",
+    "pyarrow>=4.0.0",
+    # Tunnels the Spark driver's own UI (localhost:4040 inside the
+    # container) through the Hub at /user/<name>/proxy/4040/ -- only
+    # Jupyter's own port is published from a spawned container otherwise.
+    "jupyter-server-proxy>=4.4",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "pyright>=1.1.390",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"

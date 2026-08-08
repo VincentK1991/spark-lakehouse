@@ -1,0 +1,40 @@
+[project]
+name = "lakehouse-jupyterhub"
+version = "0.1.0"
+description = "The JupyterHub Hub itself -- DockerSpawner + Keycloak OIDC SSO. Not the singleuser image (see spark/docker/notebook/pyproject.toml for that)."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "jupyterhub>=5.2",
+    "dockerspawner>=13.0",
+    "oauthenticator>=17.4",
+    # Reaps idle/abandoned singleuser servers so their Spark drivers release
+    # cores back to the shared pool -- see "Session hygiene" in
+    # docs/team_jupyter_hub.ipynb.
+    "jupyterhub-idle-culler>=1.3",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "pyright>=1.1.390",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
